@@ -1,21 +1,37 @@
 const express = require("express");
 const cors = require("cors");
-const Anthropic = require("@anthropic-ai/sdk");
 const { v4: uuidv4 } = require("uuid");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${GEMINI_API_KEY}`;
 
-// ─── In-memory session store ───────────────────────────────────────────────
-// { sessionId: { interests: [], history: [], phase: "chat"|"confirm"|"done", pendingInterest: null } }
 const sessions = {};
-
 const MAX_INTERESTS = 3;
 
-// ─── Prompts ───────────────────────────────────────────────────────────────
+async function callGemini(systemPrompt, messages) {
+  const contents = messages.map(m => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }]
+  }));
+  const body = {
+    system_instruction: { parts: [{ text: systemPrompt }] },
+    contents,
+    generationConfig: { temperature: 0.7, maxOutputTokens: 800 }
+  };
+  const res = await fetch(GEMINI_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(JSON.stringify(data));
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+}
+
 function buildChatSystem(session) {
   return `You are HelloCity's friendly onboarding assistant helping new members discover Miami.
 Your job is to warmly chat with the user and learn what they enjoy doing when going out in the city.
@@ -45,22 +61,17 @@ Return ONLY valid JSON, nothing else:
       "description": "One sentence about what makes this place special.",
       "hours": "Typical hours or 'Varies by event'",
       "vibe": "2-3 word vibe label",
-      "emoji": "one relevant emoji"
+      "emoji": "one relevant emoji",
+      "imageUrl": "https://source.unsplash.com/600x400/?miami,[relevant keyword]"
     }
   ]
 }
 Use REAL Miami venues only. Be specific and accurate.`;
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
 function extractInterest(text) {
   const match = text.match(/<EXTRACT>({.*?})<\/EXTRACT>/s);
   if (!match) return null;
-  try {
-    const parsed = JSON.parse(match[1]);
-    return parsed.interest || null;
-  } catch {
-    return null;
-  }
+  try { return JSON.parse(match[1]).interest || null; } catch { return null; }
 }
 
 function cleanMessage(text) {
@@ -69,182 +80,10 @@ function cleanMessage(text) {
 
 function getOrCreateSession(sessionId) {
   if (!sessions[sessionId]) {
-    sessions[sessionId] = {
-      interests: [],
-      history: [],
-      phase: "chat",
-      pendingInterest: null,
-    };
+    sessions[sessionId] = { interests: [], history: [], phase: "chat", pendingInterest: null };
   }
   return sessions[sessionId];
 }
-
-// ─── Routes ────────────────────────────────────────────────────────────────
-
-// POST /session — create a new session and get opening message
-app.post("/session", async (req, res) => {
-  const sessionId = uuidv4();
-  const session = getOrCreateSession(sessionId);
-
-  try {
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 300,
-      system: buildChatSystem(session),
-      messages: [{ role: "user", content: "Hello! I just joined HelloCity." }],
-    });
-
-    const rawText = response.content[0].text;
-    const assistantMsg = cleanMessage(rawText);
-
-    session.history.push(
-      { role: "user", content: "Hello! I just joined HelloCity." },
-      { role: "assistant", content: assistantMsg }
-    );
-
-    res.json({
-      sessionId,
-      message: assistantMsg,
-      state: {
-        interests: session.interests,
-        phase: session.phase,
-        interestCount: session.interests.length,
-        complete: false,
-      },
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to start session" });
-  }
-});
-
-// POST /chat — send a message, get a response (and possibly venues)
-app.post("/chat", async (req, res) => {
-  const { sessionId, message } = req.body;
-  if (!sessionId || !message) return res.status(400).json({ error: "Missing sessionId or message" });
-
-  const session = getOrCreateSession(sessionId);
-  if (session.phase === "done") return res.json({ message: "Onboarding complete.", state: buildState(session) });
-
-  session.history.push({ role: "user", content: message });
-
-  try {
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 400,
-      system: buildChatSystem(session),
-      messages: session.history,
-    });
-
-    const rawText = response.content[0].text;
-    const assistantMsg = cleanMessage(rawText);
-    const extracted = extractInterest(rawText);
-
-    session.history.push({ role: "assistant", content: assistantMsg });
-
-    // Check if we extracted a new, non-duplicate interest
-    const isDuplicate = extracted &&
-      session.interests.map(i => i.toLowerCase()).includes(extracted.toLowerCase());
-
-    if (extracted && !isDuplicate) {
-      session.pendingInterest = extracted;
-      session.phase = "confirm";
-
-      // Fetch venues from LLM
-      const venueResponse = await client.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 700,
-        system: VENUES_SYSTEM,
-        messages: [{ role: "user", content: `Give me 3 real Miami venues for: "${extracted}"` }],
-      });
-
-      let venues = [];
-      try {
-        const venueText = venueResponse.content[0].text.replace(/```json|```/g, "").trim();
-        venues = JSON.parse(venueText).venues || [];
-      } catch {
-        venues = [];
-      }
-
-      return res.json({
-        message: assistantMsg,
-        pendingInterest: extracted,
-        venues,
-        state: buildState(session),
-      });
-    }
-
-    res.json({
-      message: assistantMsg,
-      state: buildState(session),
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "LLM call failed" });
-  }
-});
-
-// POST /confirm — user confirms or denies the detected interest
-app.post("/confirm", async (req, res) => {
-  const { sessionId, confirmed } = req.body;
-  if (!sessionId) return res.status(400).json({ error: "Missing sessionId" });
-
-  const session = getOrCreateSession(sessionId);
-  if (!session.pendingInterest) return res.status(400).json({ error: "No pending interest" });
-
-  // Always count the interest regardless of yes/no (per spec)
-  session.interests.push(session.pendingInterest);
-  const justAdded = session.pendingInterest;
-  session.pendingInterest = null;
-
-  if (session.interests.length >= MAX_INTERESTS) {
-    session.phase = "done";
-    const profile = { interests: session.interests };
-
-    return res.json({
-      message: `Amazing! You're all set as a Miami insider. 🌴`,
-      profile,
-      state: buildState(session),
-    });
-  }
-
-  session.phase = "chat";
-
-  // Get next conversational message
-  const contextMsg = confirmed
-    ? `Great! "${justAdded}" has been saved. Please continue asking for the next interest naturally.`
-    : `The user said no, but we kept the interest anyway. Continue naturally asking for another interest.`;
-
-  session.history.push({ role: "user", content: confirmed ? "Yes, that's what I meant!" : "No, let's keep going." });
-
-  try {
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 300,
-      system: buildChatSystem(session) + `\n\nContext: ${contextMsg}`,
-      messages: session.history,
-    });
-
-    const rawText = response.content[0].text;
-    const assistantMsg = cleanMessage(rawText);
-    session.history.push({ role: "assistant", content: assistantMsg });
-
-    res.json({
-      message: assistantMsg,
-      state: buildState(session),
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "LLM call failed" });
-  }
-});
-
-// GET /session/:id — get current session state
-app.get("/session/:id", (req, res) => {
-  const session = sessions[req.params.id];
-  if (!session) return res.status(404).json({ error: "Session not found" });
-  res.json({ state: buildState(session) });
-});
 
 function buildState(session) {
   return {
@@ -255,6 +94,94 @@ function buildState(session) {
     profile: session.phase === "done" ? { interests: session.interests } : null,
   };
 }
+
+app.post("/session", async (req, res) => {
+  const sessionId = uuidv4();
+  const session = getOrCreateSession(sessionId);
+  try {
+    const rawText = await callGemini(buildChatSystem(session), [
+      { role: "user", content: "Hello! I just joined HelloCity." }
+    ]);
+    const assistantMsg = cleanMessage(rawText);
+    session.history.push(
+      { role: "user", content: "Hello! I just joined HelloCity." },
+      { role: "assistant", content: assistantMsg }
+    );
+    res.json({ sessionId, message: assistantMsg, state: buildState(session) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to start session", detail: err.message });
+  }
+});
+
+app.post("/chat", async (req, res) => {
+  const { sessionId, message } = req.body;
+  if (!sessionId || !message) return res.status(400).json({ error: "Missing sessionId or message" });
+  const session = getOrCreateSession(sessionId);
+  if (session.phase === "done") return res.json({ message: "Onboarding complete.", state: buildState(session) });
+  session.history.push({ role: "user", content: message });
+  try {
+    const rawText = await callGemini(buildChatSystem(session), session.history);
+    const assistantMsg = cleanMessage(rawText);
+    const extracted = extractInterest(rawText);
+    session.history.push({ role: "assistant", content: assistantMsg });
+    const isDuplicate = extracted && session.interests.map(i => i.toLowerCase()).includes(extracted.toLowerCase());
+    if (extracted && !isDuplicate) {
+      session.pendingInterest = extracted;
+      session.phase = "confirm";
+      let venues = [];
+      try {
+        const venueText = await callGemini(VENUES_SYSTEM, [
+          { role: "user", content: `Give me 3 real Miami venues for: "${extracted}"` }
+        ]);
+        venues = JSON.parse(venueText.replace(/```json|```/g, "").trim()).venues || [];
+      } catch (e) { console.error("Venue parse error:", e); }
+      return res.json({ message: assistantMsg, pendingInterest: extracted, venues, state: buildState(session) });
+    }
+    res.json({ message: assistantMsg, state: buildState(session) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "LLM call failed", detail: err.message });
+  }
+});
+
+app.post("/confirm", async (req, res) => {
+  const { sessionId, confirmed } = req.body;
+  if (!sessionId) return res.status(400).json({ error: "Missing sessionId" });
+  const session = getOrCreateSession(sessionId);
+  if (!session.pendingInterest) return res.status(400).json({ error: "No pending interest" });
+  session.interests.push(session.pendingInterest);
+  const justAdded = session.pendingInterest;
+  session.pendingInterest = null;
+  if (session.interests.length >= MAX_INTERESTS) {
+    session.phase = "done";
+    return res.json({
+      message: `Amazing! You're all set as a Miami insider. 🌴`,
+      profile: { interests: session.interests },
+      state: buildState(session),
+    });
+  }
+  session.phase = "chat";
+  session.history.push({ role: "user", content: confirmed ? "Yes, that's what I meant!" : "No, let's keep going." });
+  try {
+    const rawText = await callGemini(
+      buildChatSystem(session) + `\n\nContext: "${justAdded}" was saved. Ask for the next interest naturally.`,
+      session.history
+    );
+    const assistantMsg = cleanMessage(rawText);
+    session.history.push({ role: "assistant", content: assistantMsg });
+    res.json({ message: assistantMsg, state: buildState(session) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "LLM call failed", detail: err.message });
+  }
+});
+
+app.get("/session/:id", (req, res) => {
+  const session = sessions[req.params.id];
+  if (!session) return res.status(404).json({ error: "Session not found" });
+  res.json({ state: buildState(session) });
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`HelloCity backend running on port ${PORT}`));
