@@ -1,6 +1,8 @@
+// server.js
 const express = require("express");
 const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
+const fetch = require("node-fetch"); // ensure node-fetch is installed
 
 const app = express();
 app.use(cors());
@@ -8,31 +10,40 @@ app.use(express.json());
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+// Use Gemini v1 model endpoint (v1beta) — make sure model exists in your account
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1/models/text-bison-001:generateContent?key=${GEMINI_API_KEY}`;
 
 const sessions = {};
 const MAX_INTERESTS = 3;
 
+// Call Gemini LLM
 async function callGemini(systemPrompt, messages) {
   const contents = messages.map(m => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }]
   }));
+
+  // Prepend system prompt as first message
   const body = {
-    system_instruction: { parts: [{ text: systemPrompt }] },
-    contents,
+    contents: [
+      { role: "user", parts: [{ text: systemPrompt }] },
+      ...contents
+    ],
     generationConfig: { temperature: 0.7, maxOutputTokens: 800 }
   };
+
   const res = await fetch(GEMINI_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
+
   const data = await res.json();
   if (!res.ok) throw new Error(JSON.stringify(data));
   return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }
 
+// Build system prompt for onboarding chat
 function buildChatSystem(session) {
   return `You are HelloCity's friendly onboarding assistant helping new members discover Miami.
 Your job is to warmly chat with the user and learn what they enjoy doing when going out in the city.
@@ -52,6 +63,7 @@ or if no clear interest was detected:
 <EXTRACT>{"interest": null}</EXTRACT>`;
 }
 
+// Prompt for fetching Miami venues
 const VENUES_SYSTEM = `You are a Miami local expert. Given an interest category, return exactly 3 real Miami venues/experiences.
 Return ONLY valid JSON, nothing else:
 {
@@ -69,16 +81,19 @@ Return ONLY valid JSON, nothing else:
 }
 Use REAL Miami venues only. Be specific and accurate.`;
 
+// Extract interest from assistant message
 function extractInterest(text) {
   const match = text.match(/<EXTRACT>({.*?})<\/EXTRACT>/s);
   if (!match) return null;
   try { return JSON.parse(match[1]).interest || null; } catch { return null; }
 }
 
+// Remove extraction JSON block from text
 function cleanMessage(text) {
   return text.replace(/<EXTRACT>.*?<\/EXTRACT>/s, "").trim();
 }
 
+// Session helper
 function getOrCreateSession(sessionId) {
   if (!sessions[sessionId]) {
     sessions[sessionId] = { interests: [], history: [], phase: "chat", pendingInterest: null };
@@ -86,6 +101,7 @@ function getOrCreateSession(sessionId) {
   return sessions[sessionId];
 }
 
+// Build frontend-friendly state
 function buildState(session) {
   return {
     interests: session.interests,
@@ -96,6 +112,7 @@ function buildState(session) {
   };
 }
 
+// Start new session
 app.post("/session", async (req, res) => {
   const sessionId = uuidv4();
   const session = getOrCreateSession(sessionId);
@@ -115,18 +132,25 @@ app.post("/session", async (req, res) => {
   }
 });
 
+// Chat endpoint
 app.post("/chat", async (req, res) => {
   const { sessionId, message } = req.body;
   if (!sessionId || !message) return res.status(400).json({ error: "Missing sessionId or message" });
+
   const session = getOrCreateSession(sessionId);
   if (session.phase === "done") return res.json({ message: "Onboarding complete.", state: buildState(session) });
+
   session.history.push({ role: "user", content: message });
+
   try {
     const rawText = await callGemini(buildChatSystem(session), session.history);
     const assistantMsg = cleanMessage(rawText);
     const extracted = extractInterest(rawText);
+
     session.history.push({ role: "assistant", content: assistantMsg });
+
     const isDuplicate = extracted && session.interests.map(i => i.toLowerCase()).includes(extracted.toLowerCase());
+
     if (extracted && !isDuplicate) {
       session.pendingInterest = extracted;
       session.phase = "confirm";
@@ -139,6 +163,7 @@ app.post("/chat", async (req, res) => {
       } catch (e) { console.error("Venue parse error:", e); }
       return res.json({ message: assistantMsg, pendingInterest: extracted, venues, state: buildState(session) });
     }
+
     res.json({ message: assistantMsg, state: buildState(session) });
   } catch (err) {
     console.error(err);
@@ -146,14 +171,18 @@ app.post("/chat", async (req, res) => {
   }
 });
 
+// Confirm interest endpoint
 app.post("/confirm", async (req, res) => {
   const { sessionId, confirmed } = req.body;
   if (!sessionId) return res.status(400).json({ error: "Missing sessionId" });
+
   const session = getOrCreateSession(sessionId);
   if (!session.pendingInterest) return res.status(400).json({ error: "No pending interest" });
+
   session.interests.push(session.pendingInterest);
   const justAdded = session.pendingInterest;
   session.pendingInterest = null;
+
   if (session.interests.length >= MAX_INTERESTS) {
     session.phase = "done";
     return res.json({
@@ -162,8 +191,10 @@ app.post("/confirm", async (req, res) => {
       state: buildState(session),
     });
   }
+
   session.phase = "chat";
   session.history.push({ role: "user", content: confirmed ? "Yes, that's what I meant!" : "No, let's keep going." });
+
   try {
     const rawText = await callGemini(
       buildChatSystem(session) + `\n\nContext: "${justAdded}" was saved. Ask for the next interest naturally.`,
@@ -178,6 +209,7 @@ app.post("/confirm", async (req, res) => {
   }
 });
 
+// Get session state
 app.get("/session/:id", (req, res) => {
   const session = sessions[req.params.id];
   if (!session) return res.status(404).json({ error: "Session not found" });
