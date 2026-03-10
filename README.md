@@ -1,4 +1,4 @@
-# HelloCity — AI-Powered Interest Onboarding
+# HelloCity — AI-Powered Interest Onboarding 
 
 A full-stack mobile-first web app that onboards new HelloCity members by conversationally collecting their Miami interests.
 
