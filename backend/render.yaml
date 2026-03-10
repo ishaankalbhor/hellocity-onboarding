@@ -5,6 +5,6 @@ services:
     buildCommand: npm install
     startCommand: node server.js
     envVars:
-      - key: OPENAI_API_KEY
-        value: YOUR_ACTUAL_API_KEY_HERE
+      - key: GROQ_API_KEY
+        value: gsk_YOUR_ACTUAL_KEY_HERE
         sync: false
