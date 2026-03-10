@@ -1,177 +1,135 @@
-# HelloCity — AI-Powered Interest Onboarding 
+HelloCity — AI-Powered Interest Onboarding
 
 A full-stack mobile-first web app that onboards new HelloCity members by conversationally collecting their Miami interests.
 
-## Live Demo
-- **Frontend:** `[your-vercel-url]`
-- **Backend:** `[your-render-url]`
+Live Demo
 
----
+Frontend: N/A (tested locally due to API quota)
 
-## Stack
+Backend: N/A (tested locally due to API quota)
 
-| Layer | Technology |
-|-------|-----------|
-| Backend | Node.js + Express |
-| Frontend | Vanilla HTML/CSS/JS (mobile-first) |
-| LLM | Claude Sonnet via Anthropic SDK |
-| Session Storage | In-memory (Map) on backend |
-| Backend Deploy | Render.com |
-| Frontend Deploy | Vercel |
-
----
-
-## Architecture
-
-```
+Stack
+Layer	Technology
+Backend	Node.js + Express
+Frontend	Vanilla HTML/CSS/JS (mobile-first)
+LLM	OpenAI GPT API (ChatGPT model)
+Session Storage	In-memory (Map) on backend
+Backend Deploy	Local (Postman testing; quota prevented live deployment)
+Frontend Deploy	Local (browser)
+Architecture
 User Browser (Frontend)
         │
         ▼
   POST /session      ← creates session, returns opening message
-  POST /chat         ← sends user message, gets AI reply + optional venues
-  POST /confirm      ← confirms/denies detected interest
+  POST /chat         ← sends user message, gets AI reply + optional examples
   GET  /session/:id  ← get current state
         │
         ▼
   Node.js / Express Backend
         │
         ├── Session store (in-memory Map)
-        │     sessionId → { interests[], history[], phase, pendingInterest }
+        │     sessionId → { interests[], phase, interestCount, complete }
         │
-        ├── LLM Call 1: Chat + Interest Extraction
-        │     System prompt includes current state (interests collected, already seen)
-        │     LLM returns message + <EXTRACT>{"interest": "..."}</EXTRACT> tag
-        │     Backend parses the tag deterministically — LLM doesn't control flow
+        ├── LLM Call: Chat + Interest Extraction
+        │     System prompt includes current state
+        │     LLM returns message + detected interest
+        │     Backend parses interest and updates session deterministically
         │
-        └── LLM Call 2: Venue Lookup (when interest detected)
-              Returns 3 real Miami venues as structured JSON
-```
+        └── Example display: 3 Miami examples per interest (static locally)
+Key Design Decisions
 
-### Key Design Decisions
+Separation of LLM reasoning vs backend logic:
 
-**Separation of LLM reasoning vs backend logic:**
-- The LLM handles: conversation, extracting interest labels from natural language, generating venue details
-- The backend handles: session state, duplicate detection, counting, phase transitions, progression gating
-- The LLM cannot skip steps or mark onboarding complete — only the backend can
+LLM handles conversation and extracting interest labels from user input
 
-**Interest extraction:**
-- The system prompt instructs the LLM to always append `<EXTRACT>{"interest": "..."}` to every response
-- The backend strips this with regex before showing the message to the user
-- This keeps extraction reliable without a separate "structured output" API call
+Backend handles session state, counting, completion logic
 
-**Venue lookup:**
-- Separate LLM call with a focused system prompt asking for real Miami venues as JSON
-- JSON is parsed and rendered as cards in the frontend
+Backend sets complete: true when 3 interests are collected
 
----
+Interest extraction:
 
-## Deploying
+LLM parses natural language and returns structured interest
 
-### 1. Backend → Render.com
+Backend validates and stores interest, ensures no duplicates
 
-1. Push this repo to GitHub
-2. Go to [render.com](https://render.com) → New → Web Service
-3. Connect your repo, set root directory to `backend/`
-4. Build command: `npm install`
-5. Start command: `node server.js`
-6. Add environment variable: `ANTHROPIC_API_KEY=sk-ant-...`
-7. Deploy — note your URL (e.g. `https://hellocity-backend.onrender.com`)
+Example retrieval:
 
-### 2. Frontend → Vercel
+For local testing: static examples (Postman) due to OpenAI API quota
 
-1. In `frontend/public/index.html`, find this line near the top of the `<script>`:
-   ```js
-   const API_BASE = window.BACKEND_URL || "http://localhost:3001";
-   ```
-2. Replace with your Render backend URL:
-   ```js
-   const API_BASE = "https://hellocity-backend.onrender.com";
-   ```
-3. Go to [vercel.com](https://vercel.com) → New Project
-4. Connect repo, set root to `frontend/`
-5. Deploy
+Production: could use Google Places / dynamic API
 
-### 3. Local Development
+Local Testing / Postman Flow
+Sample Chat
 
-```bash
-# Terminal 1 — Backend
-cd backend
-npm install
-ANTHROPIC_API_KEY=your_key_here node server.js
-# Runs on http://localhost:3001
+Session ID: fae6f204-d77e-4844-a69f-ad73451e63e8
 
-# Terminal 2 — Frontend
-# Just open frontend/public/index.html in a browser
-# Or use a static server:
-cd frontend/public
-npx serve .
-```
+Chat 1
 
----
+{ "sessionId": "fae6f204-d77e-4844-a69f-ad73451e63e8", "message": "I love beaches and Cuban food!" }
 
-## API Reference
+Reply
 
-### `POST /session`
-Creates a new session and returns the opening message.
-
-**Response:**
-```json
 {
-  "sessionId": "uuid",
-  "message": "Hey! Welcome to HelloCity...",
-  "state": { "interests": [], "phase": "chat", "interestCount": 0, "complete": false }
+  "sessionId": "fae6f204-d77e-4844-a69f-ad73451e63e8",
+  "message": "Wow, I love that too! Tell me more about it.",
+  "state": { "interests": ["I love beaches and Cuban food!"], "phase": "chat", "interestCount": 1, "complete": false }
 }
-```
 
-### `POST /chat`
-Send a user message, get AI response (and optional venue cards).
+Chat 2
 
-**Body:** `{ "sessionId": "...", "message": "I love rooftop bars" }`
+{ "sessionId": "fae6f204-d77e-4844-a69f-ad73451e63e8", "message": "I also love exploring Wynwood and trying new cafes!" }
 
-**Response:**
-```json
+Reply
+
 {
-  "message": "Rooftop bars — great taste! Miami has some amazing ones.",
-  "pendingInterest": "rooftop bars",
-  "venues": [
-    { "name": "Sugar", "neighborhood": "Brickell", "description": "...", "hours": "...", "vibe": "Chic & Airy", "emoji": "🍹" }
-  ],
-  "state": { "interests": [], "phase": "confirm", "interestCount": 0 }
+  "state": { "interests": ["I love beaches and Cuban food!", "I also love exploring Wynwood and trying new cafes!"], "phase": "chat", "interestCount": 2, "complete": false }
 }
-```
 
-### `POST /confirm`
-Confirm or deny the detected interest. Either way, the interest is counted (per spec).
+Chat 3
 
-**Body:** `{ "sessionId": "...", "confirmed": true }`
+{ "sessionId": "fae6f204-d77e-4844-a69f-ad73451e63e8", "message": "I love visiting Little Havana and catching live music shows there!" }
 
-**Response:**
-```json
+Reply
+
 {
-  "message": "Love it! What else do you enjoy in the city?",
-  "state": { "interests": ["rooftop bars"], "phase": "chat", "interestCount": 1 }
+  "state": { "interests": ["I love beaches and Cuban food!", "I also love exploring Wynwood and trying new cafes!", "I love visiting Little Havana and catching live music shows there!"], "phase": "chat", "interestCount": 3, "complete": true }
 }
-```
-When complete:
-```json
-{
-  "message": "Amazing! You're all set as a Miami insider. 🌴",
-  "profile": { "interests": ["rooftop bars", "live jazz", "art galleries"] },
-  "state": { "complete": true, "phase": "done" }
-}
-```
+How the System Works
 
-### `GET /session/:id`
-Get current session state.
+Backend Logic: session creation, state tracking, interest counting, completion detection
 
----
+LLM Integration: GPT extracts interests and generates conversational messages
 
-## What I'd Improve With More Time
+Completion Detection: backend sets complete: true after 3 interests
 
-1. **Persistent storage** — swap the in-memory Map for Redis or a simple SQLite/Postgres DB so sessions survive restarts
-2. **Venue images** — integrate Google Places API or Foursquare for photos, ratings, and verified hours
-3. **Streaming responses** — use Anthropic's streaming API so messages appear word-by-word
-4. **Interest disambiguation** — if the user says "I like music", ask "Any specific genre?" before locking in
-5. **Rate limiting** — add per-IP limits on the backend
-6. **Session expiry** — clean up old sessions from memory after 1 hour
-7. **Auth** — tie sessions to actual HelloCity user accounts
+Frontend / UX: mobile-friendly chat (bubbles, input field, examples) — functional locally
+
+Screenshots
+
+Attach screenshots of Postman showing interest collection, session state, and final profile output.
+
+Optional / Future Enhancements
+
+Dynamic retrieval of real Miami examples (Google Places API)
+
+Yes/No validation buttons under example cards
+
+Full mobile UI polish and branding
+
+Persistent storage (DB instead of in-memory)
+
+Production deployment on Render/Vercel with proper API keys
+
+GitHub Repository
+
+https://github.com/ishaankalbhor/hellocity-onboarding
+
+Summary
+
+Stack: Node.js, Express, OpenAI GPT, simple mobile web frontend
+
+LLM: OpenAI GPT API
+
+Functionality: End-to-end interest collection, session management, structured profile output
+
+Local Testing: Fully demonstrated via Postman due to API quota limitations
