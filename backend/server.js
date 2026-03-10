@@ -65,7 +65,7 @@ Only include it if a new interest is detected.
 
   try {
     const completion = await groq.chat.completions.create({
-      model: "llama3-8b-8192",
+      model: "llama3-8b", // updated model
       messages: [
         { role: "system", content: systemPrompt },
         ...session.history,
@@ -76,7 +76,6 @@ Only include it if a new interest is detected.
 
     // Extract interest
     const extractMatch = aiMessage.match(/<EXTRACT>(.*?)<\/EXTRACT>/);
-
     const pendingInterest = extractMatch
       ? JSON.parse(extractMatch[1]).interest
       : null;
