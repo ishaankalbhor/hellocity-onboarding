@@ -7,173 +7,185 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3001;
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Initialize Groq client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const sessions = {};
+const MAX_INTERESTS = 3;
 
-// In-memory session store
-const sessions = new Map();
+function buildChatSystem(session) {
+  return `You are HelloCity's friendly onboarding assistant helping new members discover Miami.
+Your job is to warmly chat with the user and learn what they enjoy doing when going out in the city.
 
-// ── Helpers ─────────────────────────────
-function createSession() {
-  const sessionId = uuidv4();
-  const state = { interests: [], phase: "chat", interestCount: 0, complete: false };
-  sessions.set(sessionId, { state, history: [] });
-  return { sessionId, state };
+Rules:
+- Be warm, upbeat, conversational. Keep messages concise (2-3 sentences max).
+- Ask about ONE interest at a time.
+- An "interest" is an activity category: e.g. "rooftop bars", "live jazz", "art galleries", "Cuban food", "beach activities", "salsa dancing", etc.
+- Current state: ${session.interests.length} of ${MAX_INTERESTS} interests collected.
+- Already collected: ${session.interests.length ? session.interests.join(", ") : "none"}.
+- Never suggest or repeat an already-collected interest.
+- Keep it fun and Miami-flavored.
+
+IMPORTANT: End EVERY message with this exact tag on its own line:
+<EXTRACT>{"interest": "rooftop bars"}</EXTRACT>
+or if no clear interest was detected:
+<EXTRACT>{"interest": null}</EXTRACT>`;
 }
 
-function updateSession(sessionId, newState) {
-  const session = sessions.get(sessionId);
-  if (session) {
-    session.state = { ...session.state, ...newState };
-    return session.state;
-  }
-  return null;
-}
-
-// ── Routes ──────────────────────────────
-
-// Create new session
-app.post("/session", (req, res) => {
-  const { sessionId, state } = createSession();
-  const message = "Hey! Welcome to HelloCity. Tell me a few things you love in Miami!";
-  res.json({ sessionId, message, state });
-});
-
-// Chat endpoint
-app.post("/chat", async (req, res) => {
-  const { sessionId, message } = req.body;
-
-  const session = sessions.get(sessionId);
-  if (!session) return res.status(404).json({ error: "Session not found" });
-
-  session.history.push({ role: "user", content: message });
-
-  const systemPrompt = `
-You are a friendly Miami guide.
-Always respond conversationally.
-
-After your reply include EXACTLY ONE tag like this:
-
-<EXTRACT>{"interest": "..."}</EXTRACT>
-
-Only include it if a new interest is detected.
-`;
-
-  try {
-    const completion = await openai.chat.completions.create({
-  model: "gpt-4o-mini",
-  messages: [
-    { role: "system", content: systemPrompt },
-    ...session.history,
-  ],
-});
-
-    const aiMessage = completion.choices[0].message.content;
-
-    // Extract interest
-    const extractMatch = aiMessage.match(/<EXTRACT>(.*?)<\/EXTRACT>/);
-    const pendingInterest = extractMatch
-      ? JSON.parse(extractMatch[1]).interest
-      : null;
-
-    const cleanMessage = aiMessage.replace(/<EXTRACT>.*?<\/EXTRACT>/, "").trim();
-
-    let venues = null;
-
-    if (pendingInterest) {
-      venues = [
-        {
-          name: "Sugar",
-          neighborhood: "Brickell",
-          description: "Rooftop bar with amazing cocktails.",
-          hours: "5pm-2am",
-          vibe: "Chic & Airy",
-          emoji: "🍹",
-        },
-        {
-          name: "Juvia",
-          neighborhood: "Miami Beach",
-          description: "Modern rooftop with city views.",
-          hours: "6pm-1am",
-          vibe: "Trendy",
-          emoji: "🌇",
-        },
-        {
-          name: "Area 31",
-          neighborhood: "Downtown",
-          description: "Upscale rooftop with seafood.",
-          hours: "5pm-12am",
-          vibe: "Elegant",
-          emoji: "🍸",
-        },
-      ];
-
-      session.state.phase = "confirm";
+const VENUES_SYSTEM = `You are a Miami local expert. Given an interest category, return exactly 3 real Miami venues/experiences.
+Return ONLY valid JSON, no markdown, nothing else:
+{
+  "venues": [
+    {
+      "name": "Venue Name",
+      "neighborhood": "Neighborhood, Miami",
+      "description": "One sentence about what makes this place special.",
+      "hours": "Typical hours or 'Varies by event'",
+      "vibe": "2-3 word vibe label",
+      "emoji": "one relevant emoji"
     }
+  ]
+}
+Use REAL Miami venues only. Be specific and accurate.`;
 
-    session.history.push({ role: "assistant", content: aiMessage });
+function extractInterest(text) {
+  const match = text.match(/<EXTRACT>({.*?})<\/EXTRACT>/s);
+  if (!match) return null;
+  try { return JSON.parse(match[1]).interest || null; } catch { return null; }
+}
 
-    res.json({
-      message: cleanMessage,
-      pendingInterest,
-      venues,
-      state: session.state,
-    });
+function cleanMessage(text) {
+  return text.replace(/<EXTRACT>.*?<\/EXTRACT>/s, "").trim();
+}
 
+function getOrCreateSession(sessionId) {
+  if (!sessions[sessionId]) {
+    sessions[sessionId] = { interests: [], history: [], phase: "chat", pendingInterest: null };
+  }
+  return sessions[sessionId];
+}
+
+function buildState(session) {
+  return {
+    interests: session.interests,
+    phase: session.phase,
+    interestCount: session.interests.length,
+    complete: session.phase === "done",
+    profile: session.phase === "done" ? { interests: session.interests } : null,
+  };
+}
+
+async function callOpenAI(systemPrompt, messages, maxTokens = 400) {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    max_tokens: maxTokens,
+    messages: [{ role: "system", content: systemPrompt }, ...messages],
+  });
+  return response.choices[0].message.content;
+}
+
+// POST /session
+app.post("/session", async (req, res) => {
+  const sessionId = uuidv4();
+  const session = getOrCreateSession(sessionId);
+  try {
+    const rawText = await callOpenAI(buildChatSystem(session), [
+      { role: "user", content: "Hello! I just joined HelloCity." }
+    ]);
+    const assistantMsg = cleanMessage(rawText);
+    session.history.push(
+      { role: "user", content: "Hello! I just joined HelloCity." },
+      { role: "assistant", content: assistantMsg }
+    );
+    res.json({ sessionId, message: assistantMsg, state: buildState(session) });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "LLM error" });
+    res.status(500).json({ error: "Failed to start session", detail: err.message });
   }
 });
 
-// Confirm interest
-app.post("/confirm", (req, res) => {
+// POST /chat
+app.post("/chat", async (req, res) => {
+  const { sessionId, message } = req.body;
+  if (!sessionId || !message) return res.status(400).json({ error: "Missing sessionId or message" });
+  const session = getOrCreateSession(sessionId);
+  if (session.phase === "done") return res.json({ message: "Onboarding complete.", state: buildState(session) });
+
+  session.history.push({ role: "user", content: message });
+  try {
+    const rawText = await callOpenAI(buildChatSystem(session), session.history);
+    const assistantMsg = cleanMessage(rawText);
+    const extracted = extractInterest(rawText);
+    session.history.push({ role: "assistant", content: assistantMsg });
+
+    const isDuplicate = extracted &&
+      session.interests.map(i => i.toLowerCase()).includes(extracted.toLowerCase());
+
+    if (extracted && !isDuplicate) {
+      session.pendingInterest = extracted;
+      session.phase = "confirm";
+
+      // Fetch real Miami venues
+      let venues = [];
+      try {
+        const venueText = await callOpenAI(VENUES_SYSTEM, [
+          { role: "user", content: `Give me 3 real Miami venues for: "${extracted}"` }
+        ], 700);
+        venues = JSON.parse(venueText.replace(/```json|```/g, "").trim()).venues || [];
+      } catch (e) { console.error("Venue parse error:", e); }
+
+      return res.json({ message: assistantMsg, pendingInterest: extracted, venues, state: buildState(session) });
+    }
+
+    res.json({ message: assistantMsg, state: buildState(session) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "LLM call failed", detail: err.message });
+  }
+});
+
+// POST /confirm
+app.post("/confirm", async (req, res) => {
   const { sessionId, confirmed } = req.body;
+  if (!sessionId) return res.status(400).json({ error: "Missing sessionId" });
+  const session = getOrCreateSession(sessionId);
+  if (!session.pendingInterest) return res.status(400).json({ error: "No pending interest" });
 
-  const session = sessions.get(sessionId);
-  if (!session) return res.status(404).json({ error: "Session not found" });
+  session.interests.push(session.pendingInterest);
+  const justAdded = session.pendingInterest;
+  session.pendingInterest = null;
 
-  if (session.state.phase !== "confirm")
-    return res.status(400).json({ error: "No interest to confirm" });
+  if (session.interests.length >= MAX_INTERESTS) {
+    session.phase = "done";
+    return res.json({
+      message: `Amazing! You're all set as a Miami insider. 🌴`,
+      profile: { interests: session.interests },
+      state: buildState(session),
+    });
+  }
 
-  const interest = session.history[session.history.length - 1].content.match(
-    /<EXTRACT>(.*?)<\/EXTRACT>/
-  );
+  session.phase = "chat";
+  session.history.push({ role: "user", content: confirmed ? "Yes, that's what I meant!" : "No, let's keep going." });
 
-  let interestText = interest ? JSON.parse(interest[1]).interest : null;
-
-  if (confirmed && interestText) session.state.interests.push(interestText);
-
-  session.state.interestCount = session.state.interests.length;
-
-  session.state.phase = session.state.interestCount >= 3 ? "done" : "chat";
-
-  if (session.state.phase === "done") session.state.complete = true;
-
-  res.json({
-    message:
-      session.state.phase === "done"
-        ? "Amazing! You're all set as a Miami insider. 🌴"
-        : "Love it! What else do you enjoy in the city?",
-    profile:
-      session.state.phase === "done"
-        ? { interests: session.state.interests }
-        : undefined,
-    state: session.state,
-  });
+  try {
+    const rawText = await callOpenAI(
+      buildChatSystem(session) + `\n\nContext: "${justAdded}" was just saved. Ask for the next interest naturally.`,
+      session.history
+    );
+    const assistantMsg = cleanMessage(rawText);
+    session.history.push({ role: "assistant", content: assistantMsg });
+    res.json({ message: assistantMsg, state: buildState(session) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "LLM call failed", detail: err.message });
+  }
 });
 
-// Get session state
+// GET /session/:id
 app.get("/session/:id", (req, res) => {
-  const session = sessions.get(req.params.id);
+  const session = sessions[req.params.id];
   if (!session) return res.status(404).json({ error: "Session not found" });
-
-  res.json({ state: session.state });
+  res.json({ state: buildState(session) });
 });
 
-// Start server
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`HelloCity backend running on port ${PORT}`));
