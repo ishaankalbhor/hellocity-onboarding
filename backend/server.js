@@ -13,21 +13,23 @@ const sessions = {};
 const MAX_INTERESTS = 3;
 
 function buildChatSystem(session) {
-  return `You are HelloCity's friendly onboarding assistant helping new members discover Miami.
-Your job is to warmly chat with the user and learn what they enjoy doing when going out in the city.
+  return `You are HelloCity's onboarding assistant. Your ONLY job is to collect exactly 3 interest categories from the user.
 
-Rules:
-- Be warm, upbeat, conversational. Keep messages concise (2-3 sentences max).
-- Ask about ONE interest at a time.
-- An "interest" is an activity category: e.g. "rooftop bars", "live jazz", "art galleries", "Cuban food", "beach activities", "salsa dancing", etc.
-- Current state: ${session.interests.length} of ${MAX_INTERESTS} interests collected.
-- Already collected: ${session.interests.length ? session.interests.join(", ") : "none"}.
-- Never suggest or repeat an already-collected interest.
-- Keep it fun and Miami-flavored.
+CURRENT STATUS: ${session.interests.length} of 3 interests collected.
+COLLECTED SO FAR: ${session.interests.length ? session.interests.join(", ") : "none"}.
 
-IMPORTANT: End EVERY message with this exact tag on its own line:
-<EXTRACT>{"interest": "rooftop bars"}</EXTRACT>
-or if no clear interest was detected:
+CRITICAL RULES:
+- Keep responses SHORT (1-2 sentences max).
+- Extract an interest from ANYTHING the user says. Be aggressive about extraction.
+- "beach" = "beach activities", "food" = "dining out", "cars" = "car events", "amazing" after discussing rooftop bars = "rooftop bars"
+- If the user confirms or reacts positively to something = extract THAT thing as the interest.
+- Do NOT ask follow-up questions about the same topic. Extract it immediately and ask for the NEXT interest.
+- Do NOT have long back-and-forth conversations. One message, extract, move on.
+- Never repeat an already-collected interest.
+
+YOU MUST end EVERY single response with this exact tag on a new line (NO EXCEPTIONS EVER):
+<EXTRACT>{"interest": "exact interest category"}</EXTRACT>
+or if truly nothing extractable:
 <EXTRACT>{"interest": null}</EXTRACT>`;
 }
 
@@ -46,12 +48,6 @@ Return ONLY valid JSON, no markdown, nothing else:
     }
   ]
 }
-For imageUrl, use Unsplash source URLs with relevant keywords. Examples:
-- Rooftop bar: "https://source.unsplash.com/600x400/?miami,rooftop,bar"
-- Jazz club: "https://source.unsplash.com/600x400/?jazz,music,miami"
-- Art gallery: "https://source.unsplash.com/600x400/?art,gallery,miami"
-- Beach: "https://source.unsplash.com/600x400/?miami,beach"
-- Restaurant: "https://source.unsplash.com/600x400/?miami,restaurant,food"
 Use REAL Miami venues only. Be specific and accurate.`;
 
 function extractInterest(text) {
@@ -101,7 +97,7 @@ app.post("/session", async (req, res) => {
     const assistantMsg = cleanMessage(rawText);
     session.history.push(
       { role: "user", content: "Hello! I just joined HelloCity." },
-      { role: "assistant", content: assistantMsg }
+      { role: "assistant", content: rawText }
     );
     res.json({ sessionId, message: assistantMsg, state: buildState(session) });
   } catch (err) {
@@ -122,7 +118,7 @@ app.post("/chat", async (req, res) => {
     const rawText = await callOpenAI(buildChatSystem(session), session.history);
     const assistantMsg = cleanMessage(rawText);
     const extracted = extractInterest(rawText);
-    session.history.push({ role: "assistant", content: assistantMsg });
+    session.history.push({ role: "assistant", content: rawText });
 
     const isDuplicate = extracted &&
       session.interests.map(i => i.toLowerCase()).includes(extracted.toLowerCase());
@@ -131,7 +127,6 @@ app.post("/chat", async (req, res) => {
       session.pendingInterest = extracted;
       session.phase = "confirm";
 
-      // Fetch real Miami venues
       let venues = [];
       try {
         const venueText = await callOpenAI(VENUES_SYSTEM, [
@@ -164,22 +159,22 @@ app.post("/confirm", async (req, res) => {
   if (session.interests.length >= MAX_INTERESTS) {
     session.phase = "done";
     return res.json({
-      message: `Amazing! You're all set as a Miami insider. 🌴`,
+      message: `You're all set as a Miami insider! 🌴`,
       profile: { interests: session.interests },
       state: buildState(session),
     });
   }
 
   session.phase = "chat";
-  session.history.push({ role: "user", content: confirmed ? "Yes, that's what I meant!" : "No, let's keep going." });
+  session.history.push({ role: "user", content: confirmed ? "Yes!" : "No, let's continue." });
 
   try {
     const rawText = await callOpenAI(
-      buildChatSystem(session) + `\n\nContext: "${justAdded}" was just saved. Ask for the next interest naturally.`,
+      buildChatSystem(session) + `\n\n"${justAdded}" was just saved (${session.interests.length} of 3 done). Ask for the next interest in one short sentence.`,
       session.history
     );
     const assistantMsg = cleanMessage(rawText);
-    session.history.push({ role: "assistant", content: assistantMsg });
+    session.history.push({ role: "assistant", content: rawText });
     res.json({ message: assistantMsg, state: buildState(session) });
   } catch (err) {
     console.error(err);
