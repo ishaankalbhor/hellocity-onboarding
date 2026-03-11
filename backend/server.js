@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
-const Groq = require("groq-sdk");
+const OpenAI = require("openai");
 
 const app = express();
 app.use(cors());
@@ -10,8 +10,8 @@ app.use(express.json());
 const PORT = process.env.PORT || 3001;
 
 // Initialize Groq client
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
 // In-memory session store
@@ -64,13 +64,13 @@ Only include it if a new interest is detected.
 `;
 
   try {
-    const completion = await groq.chat.completions.create({
-      model: "llama3-8b", // updated model
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...session.history,
-      ],
-    });
+    const completion = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [
+    { role: "system", content: systemPrompt },
+    ...session.history,
+  ],
+});
 
     const aiMessage = completion.choices[0].message.content;
 
