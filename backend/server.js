@@ -41,10 +41,17 @@ Return ONLY valid JSON, no markdown, nothing else:
       "description": "One sentence about what makes this place special.",
       "hours": "Typical hours or 'Varies by event'",
       "vibe": "2-3 word vibe label",
-      "emoji": "one relevant emoji"
+      "emoji": "one relevant emoji",
+      "imageUrl": "https://source.unsplash.com/600x400/?miami,[relevant-keyword]"
     }
   ]
 }
+For imageUrl, use Unsplash source URLs with relevant keywords. Examples:
+- Rooftop bar: "https://source.unsplash.com/600x400/?miami,rooftop,bar"
+- Jazz club: "https://source.unsplash.com/600x400/?jazz,music,miami"
+- Art gallery: "https://source.unsplash.com/600x400/?art,gallery,miami"
+- Beach: "https://source.unsplash.com/600x400/?miami,beach"
+- Restaurant: "https://source.unsplash.com/600x400/?miami,restaurant,food"
 Use REAL Miami venues only. Be specific and accurate.`;
 
 function extractInterest(text) {
